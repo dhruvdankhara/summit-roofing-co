@@ -18,11 +18,34 @@ if os.path.exists(client_next_static):
 if os.path.exists(next_static):
     shutil.copytree(next_static, client_next_static)
 
-# 2. Copy .next/server/app/index.html or static html to client/index.html
+# 2. Read and prepare client/index.html with inlined Tailwind CSS
 html_src = os.path.join(".next", "server", "app", "index.html")
 client_index_html = os.path.join(client_dir, "index.html")
 if os.path.exists(html_src):
-    shutil.copyfile(html_src, client_index_html)
+    with open(html_src, "r", encoding="utf-8") as f:
+        html_content = f.read()
+
+    # Collect compiled CSS from .next/static/css
+    css_dir = os.path.join(".next", "static", "css")
+    inlined_css = ""
+    if os.path.exists(css_dir):
+        for fname in os.listdir(css_dir):
+            if fname.endswith(".css"):
+                css_file_path = os.path.join(css_dir, fname)
+                with open(css_file_path, "r", encoding="utf-8") as cf:
+                    inlined_css += cf.read() + "\n"
+
+    if inlined_css:
+        # Inject inline style tag into head for instant zero-FOUC rendering
+        style_tag = f'<style id="summit-inlined-tailwind">\n{inlined_css}\n</style>'
+        if "</head>" in html_content:
+            html_content = html_content.replace("</head>", f"{style_tag}</head>", 1)
+        else:
+            html_content = style_tag + html_content
+
+    with open(client_index_html, "w", encoding="utf-8") as f:
+        f.write(html_content)
+    print(f"[whop] successfully wrote client/index.html (inlined {len(inlined_css)} bytes of CSS)")
 
 # 3. Create server/index.js (Cloudflare Worker entry)
 server_index = """
@@ -125,9 +148,18 @@ export default {
       }
     }
 
-    // Serve static index
+    // Serve static assets via Cloudflare env.ASSETS
     if (env.ASSETS) {
-      return await env.ASSETS.fetch(request);
+      const assetResponse = await env.ASSETS.fetch(request);
+      if (assetResponse.status !== 404) {
+        return assetResponse;
+      }
+      // SPA fallback for clean route navigation
+      if (!url.pathname.includes('.') && request.method === 'GET') {
+        const indexUrl = new URL('/', request.url);
+        return await env.ASSETS.fetch(new Request(indexUrl, request));
+      }
+      return assetResponse;
     }
 
     return new Response('Summit Roofing Co. — Live on Whop', {
@@ -139,33 +171,36 @@ export default {
 with open(os.path.join(server_dir, "index.js"), "w", encoding="utf-8") as f:
     f.write(server_index)
 
-# 4. Enumerate client files
+# 4. Enumerate client files with strictly POSIX forward slashes
 client_files = []
 for root, _, files in os.walk(client_dir):
     for file in files:
         full_p = os.path.join(root, file)
-        rel_p = os.path.relpath(full_p, client_dir).replace("\\\\", "/")
+        # Use relative path and ensure ONLY forward slashes '/' are used
+        rel_p = os.path.relpath(full_p, client_dir).replace("\\", "/")
         client_files.append(rel_p)
 
-# 5. Create manifest.json
+# 5. Create manifest.json with forward-slash POSIX paths
 manifest = {
     "version": 1,
     "entry": "index.js",
     "server": ["index.js"],
-    "client": client_files
+    "client": sorted(client_files)
 }
 manifest_path = os.path.join(dist_dir, "manifest.json")
 with open(manifest_path, "w", encoding="utf-8") as f:
-    json.dump(manifest, f)
+    json.dump(manifest, f, indent=2)
 
-# 6. Build application.zip and whop-build.zip
+# 6. Build application.zip and whop-build.zip with strict POSIX paths
 for out_name in ["application.zip", "whop-build.zip"]:
     zip_path = os.path.join(dist_dir, out_name)
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.write(manifest_path, "manifest.json")
         zf.write(os.path.join(server_dir, "index.js"), "server/index.js")
         for cf in client_files:
-            full_p = os.path.join(client_dir, cf.replace("/", os.sep))
-            zf.write(full_p, f"client/{cf}")
+            disk_path = os.path.join(client_dir, cf.replace("/", os.sep))
+            # ZIP entry name MUST have forward slashes
+            zip_entry_name = f"client/{cf}"
+            zf.write(disk_path, zip_entry_name)
 
 print(f"[whop] successfully packed {len(client_files) + 1} files -> dist/whop-build.zip & dist/application.zip")
