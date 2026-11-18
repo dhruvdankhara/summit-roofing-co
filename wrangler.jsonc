@@ -1,0 +1,6 @@
+{
+  "name": "summit-roofing-co",
+  "compatibility_date": "2026-11-18",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": "dist/server/index.js"
+}
